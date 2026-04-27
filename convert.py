@@ -44,18 +44,54 @@ def has_vector_outlines(font):
             continue
     return False
 
-try:
-    fonts_in_file = fontforge.fontsInFile(input_path)
-    if not fonts_in_file:
-        fonts_in_file = [input_path]
+def find_afm(input_path):
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    input_dir = os.path.dirname(input_path)
+    search_dirs = [
+        input_dir,
+        os.path.join(input_dir, "AFM Files"),
+        os.path.join(input_dir, "AFM"),
+        os.path.join(input_dir, "afm"),
+    ]
 
-    for font_ref in fonts_in_file:
+    wanted = (base + ".afm").lower()
+    for search_dir in search_dirs:
+        if not os.path.isdir(search_dir):
+            continue
+        for filename in os.listdir(search_dir):
+            if filename.lower() == wanted:
+                return os.path.join(search_dir, filename)
+    return None
+
+def font_refs_for(input_path):
+    refs = fontforge.fontsInFile(input_path)
+    if not refs:
+        return [input_path]
+
+    openable_refs = []
+    input_dir = os.path.dirname(input_path)
+    for ref in refs:
+        if os.path.exists(ref):
+            openable_refs.append(ref)
+            continue
+        sibling = os.path.join(input_dir, ref)
+        if os.path.exists(sibling):
+            openable_refs.append(sibling)
+
+    return openable_refs or [input_path]
+
+try:
+    for font_ref in font_refs_for(input_path):
         font = None
         try:
             font = fontforge.open(font_ref)
             if font.bitmapSizes and not has_vector_outlines(font):
                 print("BITMAP:" + (font.fontname or os.path.basename(input_path)))
                 continue
+            afm_path = find_afm(input_path)
+            if afm_path:
+                font.mergeKern(afm_path)
+                print("AFM:" + afm_path)
             name = safe_name(font.fontname)
             out = unique_path(output_dir, name)
             font.generate(out)
@@ -149,7 +185,9 @@ class FontConverterGUI:
             messagebox.showerror("Fel", f"Mappen '{INPUT_DIR}' hittades inte.")
             return
         self.fonts = sorted(
-            f for f in INPUT_DIR.iterdir() if f.is_file() and not f.name.startswith(".")
+            f
+            for f in INPUT_DIR.iterdir()
+            if f.is_file() and not f.name.startswith(".") and f.suffix.lower() != ".afm"
         )
         self.display_fonts()
         self.status_var.set(f"{len(self.fonts)} typsnitt hittades i konvertera/")
@@ -252,6 +290,7 @@ class FontConverterGUI:
                 lines = (result.stdout + result.stderr).splitlines()
                 errors = [l[4:] for l in lines if l.startswith("FEL:")]
                 bitmaps = [l[7:] for l in lines if l.startswith("BITMAP:")]
+                afms = [l[4:] for l in lines if l.startswith("AFM:")]
                 outputs = [l[3:] for l in lines if l.startswith("OK:")]
 
                 if result.returncode != 0 or errors:
@@ -259,7 +298,7 @@ class FontConverterGUI:
                     failed_files.append((font_path.name, detail))
                 else:
                     if outputs:
-                        ok_files.append((font_path.name, outputs))
+                        ok_files.append((font_path.name, outputs, afms))
                     if bitmaps:
                         skipped_files.append((font_path.name, ", ".join(bitmaps)))
                     if not outputs and not bitmaps:
@@ -299,8 +338,10 @@ class FontConverterGUI:
             log.write("================\n\n")
 
             log.write("Lyckades\n")
-            for name, outputs in ok_files:
+            for name, outputs, afms in ok_files:
                 log.write(f"- {name}\n")
+                for afm in afms:
+                    log.write(f"  AFM: {afm}\n")
                 for output in outputs:
                     log.write(f"  -> {output}\n")
             if not ok_files:
