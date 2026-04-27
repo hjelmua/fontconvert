@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-import subprocess
-import sys
-import tempfile
 import os
+import subprocess
+import tempfile
+import threading
+import tkinter as tk
 from pathlib import Path
+from tkinter import messagebox, ttk
 
 BASE_DIR = Path(__file__).parent
 INPUT_DIR = BASE_DIR / "konvertera"
@@ -42,86 +44,177 @@ for font_ref in fonts_in_file:
 """
 
 
-def list_fonts():
-    return sorted(f for f in INPUT_DIR.iterdir() if not f.name.startswith('.'))
+class FontConverterGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Font Converter")
+        self.root.geometry("500x450")
 
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", self.on_search_change)
+        self.fonts = []
+        self.font_checkboxes = {}
+        self.selected_names = set()
 
-def select_fonts(fonts):
-    print("Tillgängliga typsnitt:")
-    for i, f in enumerate(fonts, 1):
-        print(f"  {i}) {f.name}")
-    print()
-    while True:
-        val = input("Välj (t.ex. 1,3,5 eller 'alla'): ").strip().lower()
-        if val == "alla":
-            return fonts
+        self.setup_gui()
+        self.load_fonts()
+
+    def setup_gui(self):
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(1, weight=1)
+
+        ttk.Label(main_frame, text="Sök typsnitt:").grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(main_frame, textvariable=self.search_var).grid(
+            row=0, column=1, sticky=(tk.W, tk.E), padx=5
+        )
+
+        list_frame = ttk.Frame(main_frame)
+        list_frame.grid(
+            row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10
+        )
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(list_frame)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
+        )
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        control_frame = ttk.Frame(main_frame)
+        control_frame.grid(row=2, column=0, columnspan=2, pady=10)
+
+        ttk.Button(control_frame, text="Välj alla", command=self.select_all).pack(
+            side=tk.LEFT, padx=5
+        )
+        ttk.Button(control_frame, text="Avmarkera alla", command=self.deselect_all).pack(
+            side=tk.LEFT, padx=5
+        )
+        ttk.Button(
+            control_frame, text="Konvertera valda", command=self.convert_selected
+        ).pack(side=tk.LEFT, padx=5)
+
+        self.status_var = tk.StringVar(value="Laddar typsnitt…")
+        ttk.Label(main_frame, textvariable=self.status_var).grid(
+            row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5
+        )
+
+    def load_fonts(self):
+        if not INPUT_DIR.exists():
+            messagebox.showerror("Fel", f"Mappen '{INPUT_DIR}' hittades inte.")
+            return
+        self.fonts = sorted(f for f in INPUT_DIR.iterdir() if not f.name.startswith("."))
+        self.display_fonts()
+        self.status_var.set(f"{len(self.fonts)} typsnitt hittades i konvertera/")
+
+    def on_search_change(self, *args):
+        self.display_fonts(self.search_var.get())
+
+    def display_fonts(self, filter_text=""):
+        for name, (_, var) in self.font_checkboxes.items():
+            if var.get():
+                self.selected_names.add(name)
+            else:
+                self.selected_names.discard(name)
+
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+        self.font_checkboxes.clear()
+
+        for i, font_path in enumerate(self.fonts):
+            if filter_text.lower() in font_path.name.lower():
+                var = tk.BooleanVar(value=font_path.name in self.selected_names)
+                var.trace_add(
+                    "write",
+                    lambda *_, n=font_path.name, v=var: self._on_checkbox(n, v),
+                )
+                ttk.Checkbutton(
+                    self.scrollable_frame, text=font_path.name, variable=var
+                ).grid(row=i, column=0, sticky=tk.W)
+                self.font_checkboxes[font_path.name] = (None, var)
+
+    def _on_checkbox(self, name, var):
+        if var.get():
+            self.selected_names.add(name)
+        else:
+            self.selected_names.discard(name)
+
+    def select_all(self):
+        for _, (_, var) in self.font_checkboxes.items():
+            var.set(True)
+
+    def deselect_all(self):
+        for _, (_, var) in self.font_checkboxes.items():
+            var.set(False)
+
+    def convert_selected(self):
+        for name, (_, var) in self.font_checkboxes.items():
+            if var.get():
+                self.selected_names.add(name)
+            else:
+                self.selected_names.discard(name)
+
+        selected = [f for f in self.fonts if f.name in self.selected_names]
+        if not selected:
+            messagebox.showwarning("Ingen markerad", "Markera minst ett typsnitt.")
+            return
+
+        threading.Thread(target=self._run_conversion, args=(selected,), daemon=True).start()
+
+    def _run_conversion(self, selected):
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        self.root.after(0, self.status_var.set, "Konverterar…")
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(FONTFORGE_SCRIPT)
+            tmp_script = f.name
+
         try:
-            indices = [int(x.strip()) for x in val.split(",")]
-            selected = [fonts[i - 1] for i in indices if 1 <= i <= len(fonts)]
-            if selected:
-                return selected
-        except (ValueError, IndexError):
-            pass
-        print("Ogiltigt val, försök igen.")
+            ok, fail, skip = 0, 0, 0
+            for font_path in selected:
+                self.root.after(0, self.status_var.set, f"Konverterar {font_path.name}…")
+                result = subprocess.run(
+                    ["fontforge", "-lang", "py", "-script", tmp_script,
+                     str(font_path), str(OUTPUT_DIR)],
+                    capture_output=True, text=True,
+                )
+                lines = (result.stdout + result.stderr).splitlines()
+                if any(l.startswith("FEL:") for l in lines):
+                    fail += 1
+                elif any(l.startswith("BITMAP:") for l in lines):
+                    skip += 1
+                else:
+                    ok += 1
+        finally:
+            os.unlink(tmp_script)
 
-
-def convert(font_path, tmp_script):
-    result = subprocess.run(
-        ["fontforge", "-lang", "py", "-script", tmp_script,
-         str(font_path), str(OUTPUT_DIR)],
-        capture_output=True, text=True
-    )
-    output = (result.stdout + result.stderr).strip()
-    lines = output.splitlines()
-    errors = [l for l in lines if l.startswith("FEL:")]
-    successes = [l for l in lines if l.startswith("OK:")]
-    bitmaps = [l for l in lines if l.startswith("BITMAP:")]
-
-    for line in successes:
-        print(f"  -> {Path(line[3:]).name}")
-    for line in bitmaps:
-        print(f"  (bitmap-font, kan inte konverteras till OTF)")
-    for line in errors:
-        print(f"  FEL: {line[4:]}")
-
-    if bitmaps and not errors and not successes:
-        return None  # varken lyckat eller misslyckat
-    return len(errors) == 0
+        parts = [f"{ok} lyckades"]
+        if skip:
+            parts.append(f"{skip} bitmap (hoppades över)")
+        if fail:
+            parts.append(f"{fail} misslyckades")
+        msg = "Klart: " + ", ".join(parts) + "."
+        self.root.after(0, self.status_var.set, msg)
+        self.root.after(0, messagebox.showinfo, "Klart", msg)
 
 
 def main():
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    fonts = list_fonts()
-    if not fonts:
-        print("Inga fonter hittades i konvertera/")
-        sys.exit(1)
-
-    selected = select_fonts(fonts)
-    print()
-
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(FONTFORGE_SCRIPT)
-        tmp_script = f.name
-
-    try:
-        ok, fail, skip = 0, 0, 0
-        for font_path in selected:
-            print(f"Konverterar {font_path.name}...")
-            result = convert(font_path, tmp_script)
-            if result is True:
-                ok += 1
-            elif result is None:
-                skip += 1
-            else:
-                fail += 1
-        parts = [f"{ok} lyckades"]
-        if skip:
-            parts.append(f"{skip} hoppades över (bitmap)")
-        if fail:
-            parts.append(f"{fail} misslyckades")
-        print(f"\nKlart: {', '.join(parts)}.")
-    finally:
-        os.unlink(tmp_script)
+    root = tk.Tk()
+    FontConverterGUI(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
